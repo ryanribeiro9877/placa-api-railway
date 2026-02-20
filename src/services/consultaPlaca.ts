@@ -38,7 +38,6 @@ export function validarPlaca(placa: string): boolean {
 
 /**
  * Mapa de labels possíveis nos sites → campo do Carro.
- * Os sites usam labels como "Marca:", "MARCA", "marca" etc.
  */
 const LABEL_MAP: Record<string, keyof Carro> = {
   "marca": "marca",
@@ -66,8 +65,13 @@ const LABEL_MAP: Record<string, keyof Carro> = {
 };
 
 /**
- * Normaliza um label removendo acentos, dois pontos, espaços extras.
+ * Labels que indicam seções de valores FIPE / financeiros — devem ser ignorados.
  */
+const LABELS_IGNORAR = [
+  "valor venal", "valor", "fipe", "preço", "preco", "seguro",
+  "ipva", "tabela", "referência", "referencia", "r$",
+];
+
 function normalizarLabel(label: string): string {
   return label
     .toLowerCase()
@@ -77,62 +81,117 @@ function normalizarLabel(label: string): string {
 }
 
 /**
- * Extrai os dados do veículo a partir do HTML retornado pelo site.
- * Usa labels das colunas para mapear corretamente os campos,
- * independente da ordem ou quantidade de colunas na tabela.
+ * Verifica se um valor parece ser financeiro/FIPE (R$ xxx, etc.)
+ */
+function isValorFinanceiro(valor: string): boolean {
+  const v = valor.trim().toLowerCase();
+  return v.startsWith("r$") || v.startsWith("r $") || /^\d{1,3}(\.\d{3})*(,\d{2})?$/.test(v);
+}
+
+/**
+ * Verifica se um label pertence a uma seção que deve ser ignorada.
+ */
+function isLabelIgnorado(label: string): boolean {
+  const norm = normalizarLabel(label);
+  return LABELS_IGNORAR.some(ign => norm.includes(ign));
+}
+
+/**
+ * Extrai os dados do veículo a partir do HTML.
+ * Usa abordagem híbrida:
+ * 1. Label-based: busca pares label/valor filtrando seções FIPE
+ * 2. Index-based (fallback): usa a primeira tabela com >= 28 TDs
  */
 function extrairDados(html: string): Carro | null {
   const $ = cheerio.load(html);
 
+  // ===== Estratégia 1: Label-based com filtro de valores financeiros =====
   const resultado: Partial<Carro> = {};
+  let dentroDeSecaoFipe = false;
 
-  // Estratégia 1: Buscar pares label/valor em <td> adjacentes
   const tds = $("td");
   for (let i = 0; i < tds.length - 1; i++) {
-    const labelText = normalizarLabel($(tds[i]).text());
-    const campo = LABEL_MAP[labelText];
-    if (campo) {
+    const rawLabel = $(tds[i]).text().trim();
+    const labelNorm = normalizarLabel(rawLabel);
+
+    // Detectar se entramos em seção FIPE/financeira
+    if (isLabelIgnorado(rawLabel)) {
+      dentroDeSecaoFipe = true;
+      continue;
+    }
+
+    const campo = LABEL_MAP[labelNorm];
+    if (campo && !dentroDeSecaoFipe) {
       const valor = $(tds[i + 1]).text().trim();
-      if (valor && !LABEL_MAP[normalizarLabel(valor)]) {
-        resultado[campo] = valor;
+      // Rejeitar se o valor parece financeiro ou é outro label
+      if (valor && !LABEL_MAP[normalizarLabel(valor)] && !isValorFinanceiro(valor) && !isLabelIgnorado(valor)) {
+        // Só aceitar o primeiro valor encontrado para cada campo
+        if (!resultado[campo]) {
+          resultado[campo] = valor;
+        }
         i++; // pula o td do valor
       }
     }
   }
 
-  // Estratégia 2: Buscar em <tr> com <th> label e <td> valor
-  if (!resultado.marca) {
-    $("tr").each((_, tr) => {
-      const th = $(tr).find("th, td:first-child").first().text();
-      const td = $(tr).find("td:last-child").text();
-      const labelText = normalizarLabel(th);
-      const campo = LABEL_MAP[labelText];
-      if (campo && td.trim() && th.trim() !== td.trim()) {
-        resultado[campo] = td.trim();
-      }
-    });
+  if (resultado.marca) {
+    console.log(`[Parser-Label] Campos: ${Object.keys(resultado).join(", ")}`);
+    return buildCarro(resultado);
   }
 
-  // Precisa ter pelo menos a marca para ser válido
-  if (!resultado.marca) return null;
+  // ===== Estratégia 2: Index-based na primeira tabela com dados =====
+  console.log("[Parser] Label-based falhou, tentando index-based...");
+  const tables = $("table");
+  for (let t = 0; t < tables.length; t++) {
+    const tableTds = $(tables[t]).find("td");
+    if (tableTds.length < 28) continue;
 
-  console.log(`[Parser] Campos extraídos: ${Object.keys(resultado).join(", ")}`);
+    const valores: (string | null)[] = [];
+    for (let i = 1; i < 28; i += 2) {
+      const td = tableTds.eq(i);
+      valores.push(td.length > 0 ? td.text().trim() : null);
+    }
 
+    if (valores[0] && !isValorFinanceiro(valores[0])) {
+      console.log(`[Parser-Index] Tabela ${t}: marca=${valores[0]}`);
+      return {
+        marca: valores[0],
+        modelo: valores[1],
+        importado: valores[2],
+        ano: valores[3],
+        anoModelo: valores[4],
+        cor: valores[5],
+        cilindrada: valores[6],
+        potencia: valores[7],
+        combustivel: valores[8],
+        chassi: valores[9],
+        motor: valores[10],
+        passageiros: valores[11],
+        uf: valores[12],
+        municipio: valores[13],
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildCarro(r: Partial<Carro>): Carro {
   return {
-    marca: resultado.marca || null,
-    modelo: resultado.modelo || null,
-    importado: resultado.importado || null,
-    ano: resultado.ano || null,
-    anoModelo: resultado.anoModelo || null,
-    cor: resultado.cor || null,
-    cilindrada: resultado.cilindrada || null,
-    potencia: resultado.potencia || null,
-    combustivel: resultado.combustivel || null,
-    chassi: resultado.chassi || null,
-    motor: resultado.motor || null,
-    passageiros: resultado.passageiros || null,
-    uf: resultado.uf || null,
-    municipio: resultado.municipio || null,
+    marca: r.marca || null,
+    modelo: r.modelo || null,
+    importado: r.importado || null,
+    ano: r.ano || null,
+    anoModelo: r.anoModelo || null,
+    cor: r.cor || null,
+    cilindrada: r.cilindrada || null,
+    potencia: r.potencia || null,
+    combustivel: r.combustivel || null,
+    chassi: r.chassi || null,
+    motor: r.motor || null,
+    passageiros: r.passageiros || null,
+    uf: r.uf || null,
+    municipio: r.municipio || null,
   };
 }
 
