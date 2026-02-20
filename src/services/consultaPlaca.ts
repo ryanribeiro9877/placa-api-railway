@@ -37,37 +37,102 @@ export function validarPlaca(placa: string): boolean {
 }
 
 /**
+ * Mapa de labels possíveis nos sites → campo do Carro.
+ * Os sites usam labels como "Marca:", "MARCA", "marca" etc.
+ */
+const LABEL_MAP: Record<string, keyof Carro> = {
+  "marca": "marca",
+  "modelo": "modelo",
+  "importado": "importado",
+  "ano": "ano",
+  "ano modelo": "anoModelo",
+  "ano-modelo": "anoModelo",
+  "anomodelo": "anoModelo",
+  "cor": "cor",
+  "cilindrada": "cilindrada",
+  "cilindradas": "cilindrada",
+  "potencia": "potencia",
+  "potência": "potencia",
+  "combustivel": "combustivel",
+  "combustível": "combustivel",
+  "chassi": "chassi",
+  "motor": "motor",
+  "passageiros": "passageiros",
+  "uf": "uf",
+  "estado": "uf",
+  "municipio": "municipio",
+  "município": "municipio",
+  "cidade": "municipio",
+};
+
+/**
+ * Normaliza um label removendo acentos, dois pontos, espaços extras.
+ */
+function normalizarLabel(label: string): string {
+  return label
+    .toLowerCase()
+    .replace(/:/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
  * Extrai os dados do veículo a partir do HTML retornado pelo site.
+ * Usa labels das colunas para mapear corretamente os campos,
+ * independente da ordem ou quantidade de colunas na tabela.
  */
 function extrairDados(html: string): Carro | null {
   const $ = cheerio.load(html);
+
+  const resultado: Partial<Carro> = {};
+
+  // Estratégia 1: Buscar pares label/valor em <td> adjacentes
   const tds = $("td");
-
-  if (tds.length < 28) return null;
-
-  const valores: (string | null)[] = [];
-  for (let i = 1; i < 28; i += 2) {
-    const td = tds.eq(i);
-    valores.push(td.length > 0 ? td.text().trim() : null);
+  for (let i = 0; i < tds.length - 1; i++) {
+    const labelText = normalizarLabel($(tds[i]).text());
+    const campo = LABEL_MAP[labelText];
+    if (campo) {
+      const valor = $(tds[i + 1]).text().trim();
+      if (valor && !LABEL_MAP[normalizarLabel(valor)]) {
+        resultado[campo] = valor;
+        i++; // pula o td do valor
+      }
+    }
   }
 
-  if (!valores[0]) return null;
+  // Estratégia 2: Buscar em <tr> com <th> label e <td> valor
+  if (!resultado.marca) {
+    $("tr").each((_, tr) => {
+      const th = $(tr).find("th, td:first-child").first().text();
+      const td = $(tr).find("td:last-child").text();
+      const labelText = normalizarLabel(th);
+      const campo = LABEL_MAP[labelText];
+      if (campo && td.trim() && th.trim() !== td.trim()) {
+        resultado[campo] = td.trim();
+      }
+    });
+  }
+
+  // Precisa ter pelo menos a marca para ser válido
+  if (!resultado.marca) return null;
+
+  console.log(`[Parser] Campos extraídos: ${Object.keys(resultado).join(", ")}`);
 
   return {
-    marca: valores[0],
-    modelo: valores[1],
-    importado: valores[2],
-    ano: valores[3],
-    anoModelo: valores[4],
-    cor: valores[5],
-    cilindrada: valores[6],
-    potencia: valores[7],
-    combustivel: valores[8],
-    chassi: valores[9],
-    motor: valores[10],
-    passageiros: valores[11],
-    uf: valores[12],
-    municipio: valores[13],
+    marca: resultado.marca || null,
+    modelo: resultado.modelo || null,
+    importado: resultado.importado || null,
+    ano: resultado.ano || null,
+    anoModelo: resultado.anoModelo || null,
+    cor: resultado.cor || null,
+    cilindrada: resultado.cilindrada || null,
+    potencia: resultado.potencia || null,
+    combustivel: resultado.combustivel || null,
+    chassi: resultado.chassi || null,
+    motor: resultado.motor || null,
+    passageiros: resultado.passageiros || null,
+    uf: resultado.uf || null,
+    municipio: resultado.municipio || null,
   };
 }
 
